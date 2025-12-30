@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>One-Hand Cosmic Navigator</title>
+    <style>
+        body { margin: 0; background: #020205; color: white; font-family: 'Inter', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; padding: 40px; box-sizing: border-box;
+            display: flex; flex-direction: column; justify-content: space-between;
+            z-index: 10;
+        }
+
+        .header { display: flex; justify-content: space-between; align-items: flex-start; }
+        
+        #planet-card {
+            background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(20px);
+            padding: 30px; border-radius: 20px; border: 1px solid rgba(0, 242, 255, 0.3);
+            min-width: 300px;
+        }
+        .tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 5px; color: #00f2ff; margin-bottom: 10px; }
+        #planet-name { font-size: 3.5rem; font-weight: 900; margin: 0; letter-spacing: -2px; }
+        
+        #cooldown-container { width: 100%; height: 6px; background: rgba(255,255,255,0.1); margin-top: 20px; border-radius: 3px; overflow: hidden; }
+        #cooldown-bar { height: 100%; background: #00f2ff; width: 100%; transition: width 0.1s linear; box-shadow: 0 0 15px #00f2ff; }
+
+        #badge {
+            background: rgba(0, 242, 255, 0.1); padding: 15px 40px;
+            border-radius: 100px; border: 2px solid #00f2ff;
+            font-weight: 800; letter-spacing: 3px; font-family: monospace;
+            text-shadow: 0 0 10px #00f2ff;
+        }
+
+        .footer { display: flex; justify-content: space-between; align-items: flex-end; }
+        .instructions { font-size: 0.9rem; background: rgba(0,0,0,0.7); padding: 25px; border-radius: 20px; line-height: 2; border: 1px solid rgba(255,255,255,0.1); }
+        .key { color: #00f2ff; font-weight: bold; }
+
+        #video-preview {
+            width: 220px; height: 165px; border-radius: 20px;
+            border: 2px solid rgba(0, 242, 255, 0.4); transform: scaleX(-1);
+            object-fit: cover; pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="header">
+            <div id="planet-card">
+                <div class="tag">Current System</div>
+                <h1 id="planet-name">Solar System</h1>
+                <div id="cooldown-container"><div id="cooldown-bar"></div></div>
+            </div>
+            <div id="badge">WAITING...</div>
+        </div>
+
+        <div class="footer">
+            <div class="instructions">
+                ✊ <strong>FIST:</strong> Move <span class="key">UP / DOWN</span> to Zoom<br>
+                ✌️ <strong>PEACE:</strong> Raise to <span class="key">SWITCH</span> Planet<br>
+                <div style="font-size: 11px; opacity: 0.5; margin-top: 10px;">ONE HAND CONTROL ACTIVE</div>
+            </div>
+            <video id="video-preview" playsinline autoplay></video>
+        </div>
+    </div>
+
+    <video id="webcam" playsinline autoplay style="display:none;"></video>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        /** PLANET CONFIG **/
+        const PLANETS = [
+            { name: "Sun", color: 0xffdd00, size: 3.5, dist: 0 },
+            { name: "Mercury", color: 0xaaaaaa, size: 0.4, dist: 7 },
+            { name: "Venus", color: 0xe3bb76, size: 0.8, dist: 11 },
+            { name: "Earth", color: 0x2271b3, size: 0.9, dist: 15 },
+            { name: "Mars", color: 0xe27b58, size: 0.6, dist: 19 },
+            { name: "Jupiter", color: 0xd39c7e, size: 2.2, dist: 28 },
+            { name: "Saturn", color: 0xc5ab6e, size: 1.8, dist: 36, ring: true },
+            { name: "Uranus", color: 0xbbe1e4, size: 1.2, dist: 44 },
+            { name: "Neptune", color: 0x6081ff, size: 1.2, dist: 52 }
+        ];
+
+        /** SCENE SETUP **/
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Stars background
+        const starGeo = new THREE.BufferGeometry();
+        const starPos = new Float32Array(15000 * 3);
+        for(let i=0; i<45000; i++) starPos[i] = (Math.random() - 0.5) * 1500;
+        starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+        scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({color: 0x888888, size: 0.5})));
+
+        const planetMeshes = [];
+        
+        function createTextLabel(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 512; canvas.height = 128;
+            ctx.font = 'bold 80px Inter, Arial'; ctx.textAlign = 'center'; ctx.fillStyle = 'white';
+            ctx.fillText(text.toUpperCase(), 256, 80);
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
+            sprite.scale.set(6, 1.5, 1);
+            return sprite;
+        }
+
+        PLANETS.forEach((data, i) => {
+            const group = new THREE.Group();
+            const count = i === 0 ? 15000 : 3000;
+            const pos = new Float32Array(count * 3);
+            for(let j=0; j<count; j++) {
+                const r = data.size * Math.pow(Math.random(), 0.5);
+                const u = Math.random()*Math.PI*2, v = Math.random()*Math.PI;
+                pos[j*3] = r*Math.sin(v)*Math.cos(u); pos[j*3+1] = r*Math.cos(v); pos[j*3+2] = r*Math.sin(v)*Math.sin(u);
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            group.add(new THREE.Points(geo, new THREE.PointsMaterial({color: data.color, size: 0.05, blending: THREE.AdditiveBlending})));
+
+            if(data.ring) {
+                const rPos = new Float32Array(2000*3);
+                for(let j=0; j<2000; j++){ 
+                    const a = Math.random()*Math.PI*2, rad = data.size*1.6 + Math.random()*1.2;
+                    rPos[j*3] = Math.cos(a)*rad; rPos[j*3+2] = Math.sin(a)*rad;
+                }
+                const rGeo = new THREE.BufferGeometry();
+                rGeo.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+                group.add(new THREE.Points(rGeo, new THREE.PointsMaterial({color: 0x666666, size: 0.03})));
+            }
+
+            const lbl = createTextLabel(data.name);
+            lbl.position.y = data.size + 2;
+            group.add(lbl);
+
+            scene.add(group);
+            planetMeshes.push({ mesh: group, data: data, angle: Math.random()*Math.PI*2 });
+        });
+
+        /** GESTURE LOGIC **/
+        let expansion = 1.0;
+        let navIndex = -1;
+        let lastSwitchTime = 0;
+        const SWITCH_COOLDOWN = 3000;
+
+        function isFist(lm) {
+            // Check if fingertips are close to the wrist
+            const d1 = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y);
+            const d2 = Math.hypot(lm[12].x - lm[0].x, lm[12].y - lm[0].y);
+            return d1 < 0.25 && d2 < 0.25;
+        }
+
+        function isPeace(lm) {
+            // Index and Middle are up, Ring and Pinky are down
+            return lm[8].y < lm[6].y && lm[12].y < lm[10].y && lm[16].y > lm[14].y;
+        }
+
+        const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.75 });
+
+        hands.onResults((results) => {
+            let status = "IDLE";
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const lm = results.multiHandLandmarks[0];
+
+                // ✊ FIST ZOOM: Move fist up/down to zoom
+                if (isFist(lm)) {
+                    // Map wrist Y (0.1 to 0.9) to Expansion (0.2 to 2.5)
+                    // Note: MediaPipe Y is inverted (0 at top)
+                    const normalizedY = 1 - lm[0].y; 
+                    expansion = THREE.MathUtils.lerp(expansion, normalizedY * 3, 0.1);
+                    status = "ZOOMING";
+                } 
+                // ✌️ PEACE SWITCH
+                else if (isPeace(lm)) {
+                    const now = Date.now();
+                    if (now - lastSwitchTime > SWITCH_COOLDOWN) {
+                        navIndex = (navIndex + 1 >= PLANETS.length) ? -1 : navIndex + 1;
+                        document.getElementById('planet-name').innerText = navIndex === -1 ? "Solar System" : PLANETS[navIndex].name;
+                        lastSwitchTime = now;
+                    }
+                    status = "SWITCHING";
+                }
+            }
+            document.getElementById('badge').innerText = status;
+        });
+
+        const cam = new Camera(document.getElementById('webcam'), {
+            onFrame: async () => { 
+                await hands.send({ image: document.getElementById('webcam') });
+                document.getElementById('video-preview').srcObject = document.getElementById('webcam').srcObject;
+            }
+        });
+        cam.start();
+
+        /** RENDER LOOP **/
+        const targetPos = new THREE.Vector3();
+        const targetLook = new THREE.Vector3();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = Date.now();
+            
+            // UI Cooldown
+            const progress = Math.min((now - lastSwitchTime) / SWITCH_COOLDOWN, 1);
+            document.getElementById('cooldown-bar').style.width = (progress * 100) + "%";
+
+            // Planet Orbits
+            planetMeshes.forEach((p, i) => {
+                p.angle += 0.005 / (p.data.dist * 0.1 + 1);
+                const r = p.data.dist * Math.max(0.2, expansion);
+                p.mesh.position.set(Math.cos(p.angle)*r, 0, Math.sin(p.angle)*r);
+                p.mesh.rotation.y += 0.01;
+            });
+
+            // Camera Target
+            if (navIndex === -1) {
+                targetPos.set(0, 40 * expansion + 10, 60 * expansion + 15);
+                targetLook.set(0, 0, 0);
+            } else {
+                const p = planetMeshes[navIndex].mesh;
+                const offset = PLANETS[navIndex].size * 7;
+                targetPos.set(p.position.x, p.position.y + offset/3, p.position.z + offset);
+                targetLook.copy(p.position);
+            }
+
+            camera.position.lerp(targetPos, 0.05);
+            camera.lookAt(targetLook);
+            renderer.render(scene, camera);
+        }
+
+        animate();
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
